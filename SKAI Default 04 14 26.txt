@@ -47627,53 +47627,77 @@ function rankByProb(probTable, currentSkips, K){
       var t = w;
 
       function step(){
-        if (t >= N) {
-          var avgScore = cases ? (totalScore / cases) : 0;
+        // FIX: wrap in try-catch so any exception thrown by buildSkipStats,
+        // toProbTable, rankByProb, or splitBalls (e.g. malformed draw data)
+        // resolves the Promise with whatever results are accumulated so far,
+        // rather than leaving it permanently pending.  Without this guard a
+        // single throw inside a setTimeout callback orphans the Promise,
+        // __SKAI_AT_PROMISE__ hangs forever, runSkaiML never exits its
+        // `await __SKAI_AT_PROMISE__`, and the watchdog fires
+        // "watchdog:no-heartbeat" after LIMIT_MS (120 s).
+        try {
+          if (t >= N) {
+            var avgScore = cases ? (totalScore / cases) : 0;
+            resolve({
+              avgScore:   avgScore,
+              mainHits:   mainHits,
+              bonusHits:  bonusHits,
+              cases:      cases,
+              weights:    wt,
+              pickSpec:   spec
+            });
+            return;
+          }
+
+          // stats from [t-w, t)
+          var stats = buildSkipStats(draws, t - w, t);
+          var Pm    = toProbTable(stats.histMain,  lapK);
+          var Pb    = toProbTable(stats.histBonus, lapK);
+
+          var pickM = rankByProb(Pm, stats.curMain,  20);
+          var pickB = rankByProb(Pb, stats.curBonus, 5);
+
+          var actual = splitBalls(draws[t]) || {};
+          var aM = Object.create(null);
+          var aB = Object.create(null);
+
+          (actual.main||[]).forEach(function(v){ aM[String(v|0)] = 1; });
+          (actual.bonus||[]).forEach(function(v){ aB[String(v|0)] = 1; });
+
+          var hitM = 0;
+          for (var i = 0; i < pickM.length; i++){
+            if (aM[String(pickM[i]|0)]) hitM++;
+          }
+
+          var hitB = 0;
+          for (var j = 0; j < pickB.length; j++){
+            if (aB[String(pickB[j]|0)]) hitB++;
+          }
+
+          mainHits  += hitM;
+          bonusHits += hitB;
+          cases++;
+
+          totalScore += (hitM * wt.main) + (hitB * wt.bonus);
+
+          t++;
+          // Yield to keep UI responsive
+          setTimeout(step, 0);
+        } catch(stepErr) {
+          // Resolve with whatever has been accumulated so far so the
+          // backtestWindow Promise always settles and the Auto-Tune chain
+          // (emitAutotuneProgress -> beat -> heartbeat) can continue.
+          try { console.warn('[SKAI][BT] step error at t=' + t, stepErr); } catch(_){}
+          var avgOnErr = cases ? (totalScore / cases) : 0;
           resolve({
-            avgScore:   avgScore,
+            avgScore:   avgOnErr,
             mainHits:   mainHits,
             bonusHits:  bonusHits,
             cases:      cases,
             weights:    wt,
             pickSpec:   spec
           });
-          return;
         }
-
-        // stats from [t-w, t)
-        var stats = buildSkipStats(draws, t - w, t);
-        var Pm    = toProbTable(stats.histMain,  lapK);
-        var Pb    = toProbTable(stats.histBonus, lapK);
-
-        var pickM = rankByProb(Pm, stats.curMain,  20);
-        var pickB = rankByProb(Pb, stats.curBonus, 5);
-
-        var actual = splitBalls(draws[t]) || {};
-        var aM = Object.create(null);
-        var aB = Object.create(null);
-
-        (actual.main||[]).forEach(function(v){ aM[String(v|0)] = 1; });
-        (actual.bonus||[]).forEach(function(v){ aB[String(v|0)] = 1; });
-
-        var hitM = 0;
-        for (var i = 0; i < pickM.length; i++){
-          if (aM[String(pickM[i]|0)]) hitM++;
-        }
-
-        var hitB = 0;
-        for (var j = 0; j < pickB.length; j++){
-          if (aB[String(pickB[j]|0)]) hitB++;
-        }
-
-        mainHits  += hitM;
-        bonusHits += hitB;
-        cases++;
-
-        totalScore += (hitM * wt.main) + (hitB * wt.bonus);
-
-        t++;
-        // Yield to keep UI responsive
-        setTimeout(step, 0);
       }
 
       step();
