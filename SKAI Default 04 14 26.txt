@@ -52101,60 +52101,9 @@ document.addEventListener('DOMContentLoaded', function () {
   // a within-tab reload can still recover result data.
   // -----------------------------------------------------------------------
   function checkPendingBatch() {
-    var raw;
-    var state;
-    try {
-      raw = localStorage.getItem(LS_STATE_KEY);
-      if (!raw) {
-        // No pending batch -- clear session store on fresh load.
-        try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
-        return;
-      }
-      state = JSON.parse(raw);
-    } catch (_) {
-      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
-      try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
-      return;
-    }
-    // Validate required fields.
-    if (!state || typeof state !== 'object' || typeof state.index !== 'number') {
-      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
-      try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
-      return;
-    }
-    // Discard states older than 24 hours or with no completed runs.
-    var age = Date.now() - (state.ts || 0);
-    if (age > 86400000 || (state.doneCount || 0) <= 0) {
-      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
-      try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
-      return;
-    }
-    // Check whether session results are still present (tab was only reloaded).
-    var hasSession = false;
-    try {
-      var rawSession = sessionStorage.getItem(SESSION_KEY);
-      hasSession = !!(rawSession && rawSession.length > 2);
-    } catch (_) { hasSession = false; }
-    var completed = (state.doneCount || 0) - (state.failCount || 0);
-    var failed    = state.failCount || 0;
-    var msg = 'A batch run was interrupted.\n'
-      + completed + ' completed'
-      + (failed > 0 ? ', ' + failed + ' failed' : '')
-      + ' of ' + BATCH_COMBOS.length + ' runs.\n\n'
-      + (hasSession ? 'Completed results can be restored.' : 'Result detail is not available (session expired).')
-      + '\n\nRestore the batch summary? (Cancel to discard)';
-    var doRestore = false;
-    try { doRestore = !!window.confirm(msg); } catch (_) {}
-    if (doRestore) {
-      // Restore grid and progress from sessionStorage while it is still intact.
-      restorePersistedResults();
-      // Clear localStorage so the dialog does not reappear on the next page load.
-      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
-    } else {
-      // User discarded -- clear both stores.
-      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
-      try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
-    }
+    // Restore prompt removed: silently discard any interrupted-batch state on load.
+    try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
+    try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
   }
 
   // -----------------------------------------------------------------------
