@@ -42792,8 +42792,16 @@ try {
       // time __SKAI_RUNNING__ becomes false.  Previously clearBeat ran on
       // skai:ml:done which set __SKAI_HB__=null immediately; the next watchdog tick
       // (10 s) then saw sinceBeat=Infinity > LIMIT_MS and fired the false stop.
-      window.addEventListener('skai:learned',    beat);
-      window.addEventListener('skai:score:done', beat);
+      window.addEventListener('skai:learned',       beat);
+      window.addEventListener('skai:score:done',    beat);
+      // FIX: beat on skai:autotune:done so the watchdog does not fire in the
+      // window between Auto-Tune finishing and the first skai:ml:epoch.
+      // When the runner was deferred (SKAI_FLAGS.autotuneRunning), it resumes
+      // inside a skai:autotune:done handler.  The last skai:autotune:progress
+      // beat happened at the end of the tuner loop; without this additional
+      // beat the gap from that final progress event to the first epoch can
+      // exceed LIMIT_MS on slow devices and trigger a false stop.
+      window.addEventListener('skai:autotune:done', beat);
 
       // NEW: mark T0 at training start for accurate MAX_RUN timing (for every run)
       // Also seed the heartbeat immediately so the watchdog's sinceBeat does not
@@ -46955,11 +46963,24 @@ function handleClick(e){
   };
 
   if (useWhen) {
-    window.whenRunnerReady(15000).then(function(fn){ runOnce(fn); }).catch(onFail);
+    window.whenRunnerReady(15000).then(function(fn){
+      // FIX: Reset the click-guard flag before handing off to the runner.
+      // handleClick sets __SKAI_RUNNING__=true synchronously to prevent a second
+      // click from sneaking in while whenRunnerReady resolves.  The runner
+      // (runSkaiML) has its OWN guard that checks __SKAI_RUNNING__ and returns
+      // immediately if it is already true — so without this reset, runSkaiML
+      // silently aborts, the heartbeat is never primed, and the watchdog fires
+      // with sinceBeat=Infinity causing the "stuck in Initializing" stop.
+      // Resetting here is safe: the runner sets the flag itself before any await.
+      try { window.__SKAI_RUNNING__ = false; } catch(_) {}
+      runOnce(fn);
+    }).catch(onFail);
   } else {
     var fn = (typeof window.SKAI_getRunner === 'function')
       ? (function(){ try { return window.SKAI_getRunner(); } catch(_) { return null; } })()
       : (window.SKAI_startPredictionFlow || window.runSkaiML || window.SKAI_run || window.runSkaiClientOnce || window.startSkaiML || null);
+    // FIX: same reset as the whenRunnerReady path above.
+    try { window.__SKAI_RUNNING__ = false; } catch(_) {}
     try { runOnce(fn); } catch (err) { onFail(err); }
   }
 }
