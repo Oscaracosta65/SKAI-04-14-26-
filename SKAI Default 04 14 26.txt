@@ -50266,14 +50266,15 @@ document.addEventListener('DOMContentLoaded', function () {
   // Batch state  (strict separation: batch state | run state | UI state)
   // -----------------------------------------------------------------------
   var batchState = {
-    running:     false,
-    paused:      false,
-    stopped:     false,
-    index:       0,
-    doneCount:   0,
-    failCount:   0,          // runs that completed but returned no main numbers
-    token:       null,       // active run token -- changes each run
-    pauseResume: null        // stored callback for resume
+    running:       false,
+    paused:        false,
+    stopped:       false,
+    index:         0,
+    doneCount:     0,
+    failCount:     0,          // runs that completed but returned no main numbers
+    saveFailCount: 0,          // runs that completed but whose auto-save failed
+    token:         null,       // active run token -- changes each run
+    pauseResume:   null        // stored callback for resume
   };
   var batchResults = [];
 
@@ -51161,11 +51162,21 @@ document.addEventListener('DOMContentLoaded', function () {
       saveAllSequential([idx], function(_saveResult) {
         if (batchState.stopped) { onBatchEnd(); return; }
         if (_saveResult && _saveResult.ok === false) {
-          batchState.stopped = true;
-          batchState.running = false;
-          syncAliases();
-          onBatchEnd();
-          return;
+          // Save failed for this run -- mark the cell so the user can re-save later,
+          // but DO NOT stop the batch.  The remaining combos should still run.
+          try {
+            var _sfReason = (_saveResult.detail && (_saveResult.detail.reason || _saveResult.detail.message))
+              ? String(_saveResult.detail.reason || _saveResult.detail.message) : 'save_failed';
+            batchState.saveFailCount += 1;
+            syncAliases();
+            var _sfHtml = "<span style='color:#d97706;font-weight:600;'>Done</span>"
+              + " <span style='font-size:0.75rem;color:#dc2626;'>(save failed: " + _sfReason + ")</span>"
+              + " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + idx + "'>View</a>";
+            if (combo && combo.profile && combo.strategy) {
+              setCell(combo.profile, combo.strategy, _sfHtml, 'error');
+            }
+            console.warn('[SKAI batch] Auto-save failed for combo ' + (idx + 1) + ' (' + (combo && combo.label) + '). Reason: ' + _sfReason + '. Continuing batch.');
+          } catch (_) {}
         }
         setTimeout(runNext, 400);
       }, 1, 1);
@@ -51180,35 +51191,37 @@ document.addEventListener('DOMContentLoaded', function () {
     batchState.paused  = false;
     syncAliases();
     setPauseButtonLabel(false);
-    var _endCompleted = batchState.doneCount - batchState.failCount;
-    var _endFailed    = batchState.failCount;
-    var _endTotal     = BATCH_COMBOS.length;
-    var _endSummary   = _endCompleted + ' completed';
+    var _endCompleted  = batchState.doneCount - batchState.failCount;
+    var _endFailed     = batchState.failCount;
+    var _endSaveFailed = batchState.saveFailCount || 0;
+    var _endTotal      = BATCH_COMBOS.length;
+    var _endSummary    = _endCompleted + ' completed';
     if (_endFailed > 0) { _endSummary += ', ' + _endFailed + ' failed'; }
+    if (_endSaveFailed > 0) { _endSummary += ', ' + _endSaveFailed + ' save failed'; }
     _endSummary += ' of ' + _endTotal;
     setCurrentLabel(batchState.stopped ? 'Batch stopped. ' + _endSummary + '.' : 'All runs complete. ' + _endSummary + '.');
     updateProgress();
     try {
       console.log('[SKAI batch] onBatchEnd: ' + batchState.doneCount + '/' + _endTotal +
-        ' combos done (' + _endFailed + ' failed), stopped=' + batchState.stopped);
+        ' combos done (' + _endFailed + ' failed, ' + _endSaveFailed + ' save-failed), stopped=' + batchState.stopped);
     } catch (_) {}
     var saveRow = qs('skai-batch-save-row');
     if (saveRow && batchState.doneCount > 0 &&
         (batchState.stopped || batchState.doneCount >= BATCH_COMBOS.length)) {
       var saveNote = qs('skai-batch-save-completion-note');
       if (saveNote) {
-        var _failNote = _endFailed > 0 ? ' <strong>' + _endFailed + ' run' + (_endFailed === 1 ? '' : 's') + ' failed</strong> (no numbers captured).' : '';
+        var _failNote     = _endFailed > 0     ? ' <strong>' + _endFailed     + ' run' + (_endFailed     === 1 ? '' : 's') + ' failed</strong> (no numbers captured).' : '';
+        var _saveFailNote = _endSaveFailed > 0 ? ' <strong>' + _endSaveFailed + ' run' + (_endSaveFailed === 1 ? '' : 's') + ' could not be saved automatically</strong> &mdash; use <strong>Re-save Selected</strong> to retry those.' : '';
         if (batchState.stopped && batchState.doneCount < BATCH_COMBOS.length) {
           saveNote.innerHTML = '<strong>Batch was stopped early.</strong> <strong>' +
-            _endCompleted + ' completed, ' + (batchState.doneCount) + ' of ' + _endTotal + '</strong> ran.' + _failNote + ' ' +
+            _endCompleted + ' completed, ' + (batchState.doneCount) + ' of ' + _endTotal + '</strong> ran.' + _failNote + _saveFailNote + ' ' +
             'Completed runs were saved automatically. Use <strong>Re-save Selected</strong> if needed.';
           saveNote.style.color       = '#92400e';
           saveNote.style.background  = '#fffbeb';
           saveNote.style.borderColor = '#fcd34d';
-        } else if (_endFailed > 0) {
+        } else if (_endFailed > 0 || _endSaveFailed > 0) {
           saveNote.innerHTML = '<strong>' + _endCompleted + ' of ' + _endTotal + ' runs completed successfully.</strong>' +
-            _failNote + ' Successful runs were saved automatically to your dashboard.' +
-            ' Use <strong>Re-save Selected</strong> for any that need to be resaved.';
+            _failNote + _saveFailNote + ' Successful runs were saved automatically to your dashboard.';
           saveNote.style.color       = '#92400e';
           saveNote.style.background  = '#fffbeb';
           saveNote.style.borderColor = '#fcd34d';
@@ -51858,14 +51871,15 @@ document.addEventListener('DOMContentLoaded', function () {
         // Guard: prevent duplicate batch start.
         if (batchState.running) { return; }
         // Reset batch state fully before starting.
-        batchState.running   = true;
-        batchState.paused    = false;
-        batchState.stopped   = false;
-        batchState.index     = 0;
-        batchState.doneCount = 0;
-        batchState.failCount = 0;
-        batchState.token     = null;
-        batchState.pauseResume = null;
+        batchState.running       = true;
+        batchState.paused        = false;
+        batchState.stopped       = false;
+        batchState.index         = 0;
+        batchState.doneCount     = 0;
+        batchState.failCount     = 0;
+        batchState.saveFailCount = 0;
+        batchState.token         = null;
+        batchState.pauseResume   = null;
         batchResults = [];
         syncAliases();
         try {
@@ -51940,6 +51954,7 @@ document.addEventListener('DOMContentLoaded', function () {
         batchState.index       = 0;
         batchState.doneCount   = 0;
         batchState.failCount   = 0;
+        batchState.saveFailCount = 0;
         batchState.token       = null;
         batchState.pauseResume = null;
         batchResults = [];
@@ -52032,8 +52047,9 @@ document.addEventListener('DOMContentLoaded', function () {
       var saved = loadPersistedResults();
       if (!saved || saved.length === 0) { return; }
       batchResults = saved;
-      batchState.doneCount = 0;
-      batchState.failCount = 0;
+      batchState.doneCount     = 0;
+      batchState.failCount     = 0;
+      batchState.saveFailCount = 0;
       var hasAny = false;
       for (var i = 0; i < saved.length; i++) {
         var r = saved[i];
