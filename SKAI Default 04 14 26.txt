@@ -42786,6 +42786,14 @@ try {
       window.addEventListener('skai:autotune:progress', beat);
       window.addEventListener('skai:ml:epoch', beat);
       window.addEventListener('skai:extra:epoch', beat);
+      // FIX: also re-prime heartbeat at scoring phase boundaries so the watchdog
+      // never fires during the post-training async window (blend tuning, inference,
+      // temperature calibration) that runs between the last skai:ml:epoch and the
+      // time __SKAI_RUNNING__ becomes false.  Previously clearBeat ran on
+      // skai:ml:done which set __SKAI_HB__=null immediately; the next watchdog tick
+      // (10 s) then saw sinceBeat=Infinity > LIMIT_MS and fired the false stop.
+      window.addEventListener('skai:learned',    beat);
+      window.addEventListener('skai:score:done', beat);
 
       // NEW: mark T0 at training start for accurate MAX_RUN timing (for every run)
       // Also seed the heartbeat immediately so the watchdog's sinceBeat does not
@@ -42805,10 +42813,17 @@ try {
       var clearBeat = function(){
         try { window.__SKAI_HB__ = null; window.__SKAI_T0__ = null; } catch(_){ }
       };
+      // FIX: do NOT clear the heartbeat on skai:ml:done.
+      // skai:ml:done fires while __SKAI_RUNNING__ is still true (scoring, extra
+      // training, and blend-tuning awaits have not yet finished).  Clearing here
+      // set __SKAI_HB__=null so the very next watchdog tick (10 s) computed
+      // sinceBeat=Infinity > LIMIT_MS and fired a false watchdog:no-heartbeat stop.
+      // The heartbeat is kept alive via the skai:learned / skai:score:done listeners
+      // added above, and cleared cleanly only on skai:analysis-stop (or by the next
+      // skai:ml:start beat() call at the start of the following run).
       /* CHG: ES5-safe signature (no options object).
          Reason: old browsers/webviews can throw on {once:true}.
          Benefit: watchdog teardown still works; duplicate clears are harmless. */
-      window.addEventListener('skai:ml:done',       clearBeat, false);
       window.addEventListener('skai:analysis-stop', clearBeat, false);
 
       var LIM       = (window.SKAI_LIMITS || {});
