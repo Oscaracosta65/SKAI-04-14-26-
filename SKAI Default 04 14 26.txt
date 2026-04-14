@@ -37164,7 +37164,10 @@ if (typeof window.runSkaiML !== 'function') { // singleton guard to avoid redefi
       await window.__SKAI_AT_PROMISE__;
       window.__SKAI_TUNED_THIS_RUN__ = true;
     } catch (e) {
-      // Surface the failure; training must not proceed with unknown window
+      // FIX: clear the cached promise so the NEXT run issues a fresh runAutoTune()
+      // call rather than awaiting the same already-rejected promise and instantly
+      // rethrowing.  Without this the user cannot recover without a page reload.
+      try { window.__SKAI_AT_PROMISE__ = null; } catch(_){}
       throw (e instanceof Error ? e : new Error(String(e)));
     }
 
@@ -37178,7 +37181,13 @@ if (typeof window.runSkaiML !== 'function') { // singleton guard to avoid redefi
                 : isFinite(+sv.bestWindow)  ? (+sv.bestWindow)  : NaN;
 
       if (!isFinite(tunedW) || tunedW < 2 || tunedW > 2000) {
-        throw new Error('Auto-Tune did not produce a valid window');
+        // FIX: fall back to the UI window input or a safe default (20) rather
+        // than throwing.  A throw here leaves __SKAI_RUNNING__=true until the
+        // watchdog fires 120 s later.  A bad tunedW is non-fatal; the model
+        // trains fine with a reasonable default window.
+        var _wFbEl = document.getElementById('windowSize_ui') || document.getElementById('windowSize');
+        var _wFbVal = (_wFbEl && isFinite(+_wFbEl.value) && +_wFbEl.value >= 2) ? (+_wFbEl.value | 0) : 20;
+        tunedW = _wFbVal;
       }
       // Defer exact application until settings object is built below; we also pre-apply here for safety.
       try { if (!window.__SKAI_TUNED_WINDOW__) { window.__SKAI_TUNED_WINDOW__ = tunedW|0; } } catch(_){}
@@ -46659,7 +46668,13 @@ window.SKAI_spinnerHide = function(){
 
         // Let the runner set __SKAI_RUNNING__ itself to avoid -already running?-
         try { document.documentElement.classList.add('__skai-running'); } catch(_){}
-        fn();
+        // FIX: capture the Promise returned by async runners and route any
+        // rejection through fail() so __SKAI_RUNNING__ is reset immediately
+        // instead of waiting LIMIT_MS (120 s) for the watchdog to fire.
+        var p = fn();
+        if (p && typeof p.then === 'function') {
+          p.then(null, function(err){ try { fail(err); } catch(_){} });
+        }
       };
 
       var fail = function(err){
@@ -46946,7 +46961,14 @@ function handleClick(e){
 
   var runOnce = function(fn){
     if (typeof fn !== 'function') throw new Error('Runner not ready');
-    fn();
+    // FIX: capture the Promise returned by async runners so that any rejection
+    // (e.g. TF not loaded, Auto-Tune threw, dataset too small) reaches onFail
+    // immediately.  Without this, __SKAI_RUNNING__ stays true after the throw
+    // and the user must wait LIMIT_MS (120 s) for the watchdog to fire a stop.
+    var p = fn();
+    if (p && typeof p.then === 'function') {
+      p.then(null, function(err){ try { onFail(err); } catch(_){} });
+    }
   };
 
   var onFail = function(err){
