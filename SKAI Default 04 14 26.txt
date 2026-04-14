@@ -35689,7 +35689,8 @@ if (live0) live0.textContent = 'Nothing to copy yet - run AI first.';
       var m   = window.buildSkaiModel(s, ds.inputDim, out);
 
       return m.fit(xsT, ysT, {
-        epochs: s.epochs, batchSize: s.batchSize, shuffle: true, validationSplit: 0.1, verbose: 0
+        epochs: s.epochs, batchSize: s.batchSize, shuffle: true, validationSplit: 0.1, verbose: 0,
+        callbacks: { onEpochEnd: function(){ try { window.__SKAI_HB__ = Date.now(); } catch(_){} } }
       }).then(function(hist){
 
         var best = Infinity, last = Infinity;
