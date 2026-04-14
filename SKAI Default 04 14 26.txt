@@ -9252,6 +9252,23 @@ $labelInput = implode(' - ', $parts);
             if ($allowedExtraCount <= 0) {
                 $allowedExtraCount = 2;
             }
+            // Standard SKAI saves must persist the full trained extra payload.
+            // For regular lotteries with extras in this SKAI pipeline, enforce 5.
+            if ($isSkaiPool && $allowedExtraCount < 5) {
+                $allowedExtraCount = 5;
+            }
+            if ($isSkaiPool && count($extraArr) < $allowedExtraCount) {
+                skai_debug_log('[SKAI SAVE BLOCKED] reason=too_few_extra_balls count=' . count($extraArr) . ' required=' . (int)$allowedExtraCount);
+                if ($skaiBatchSaveMode) {
+                    $skaiRespondBatchJson(false, [
+                        'reason'      => 'too_few_extra_balls',
+                        'message'     => 'We couldn\'t save: extra balls are incomplete (need ' . (int)$allowedExtraCount . ').',
+                        'batch_index' => $skaiBatchSaveIndex, 'batch_total' => $skaiBatchSaveTotal, 'batch_label' => $skaiBatchSaveLabel,
+                    ]);
+                }
+                if (!$skaiIsXhrSaveRequest) { $app->enqueueMessage('We couldn\'t save: extra balls are incomplete (need ' . (int)$allowedExtraCount . ').', 'error'); }
+                goto SKAI_SAVE_DONE;
+            }
             if (count($extraArr) > $allowedExtraCount) {
                 skai_debug_log('[SKAI SAVE BLOCKED] reason=too_many_extra_balls count=' . count($extraArr) . ' allowed=' . (int)$allowedExtraCount);
                 if ($skaiBatchSaveMode) {
@@ -49747,61 +49764,75 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function _skaiCollectLiveExtraNumbers(limit) {
-    var out = [];
     var i;
-    var pushUnique = function (n) {
+    var candidates = [];
+    var addCandidate = function (arrLike) {
+      var norm = _skaiNormalizeInts(arrLike || []);
+      var uniq = [];
       var j;
-      for (j = 0; j < out.length; j++) {
-        if (out[j] === n) { return; }
+      for (j = 0; j < norm.length; j++) {
+        if (uniq.indexOf(norm[j]) === -1) { uniq.push(norm[j]); }
       }
-      out.push(n);
+      if (uniq.length) { candidates.push(uniq.slice(0, Math.max(0, limit))); }
     };
 
-    var fromLists = [window.__SKAI_LAST_EXTRA__, window.SKAI_LAST_EXTRA, window.skaiSaveExtraOrdered];
-    for (i = 0; i < fromLists.length && out.length < limit; i++) {
-      var list = _skaiNormalizeInts(fromLists[i] || []);
-      var li;
-      for (li = 0; li < list.length && out.length < limit; li++) {
-        pushUnique(list[li]);
-      }
-    }
+    addCandidate(window.__SKAI_LAST_EXTRA__);
+    addCandidate(window.SKAI_LAST_EXTRA);
+    addCandidate(window.skaiSaveExtraOrdered);
 
-    if (out.length < limit && Array.isArray(window.SKAI_TOP_EXTRA)) {
-      for (i = 0; i < window.SKAI_TOP_EXTRA.length && out.length < limit; i++) {
+    if (Array.isArray(window.SKAI_TOP_EXTRA) && window.SKAI_TOP_EXTRA.length) {
+      var topExtras = [];
+      for (i = 0; i < window.SKAI_TOP_EXTRA.length && topExtras.length < limit; i++) {
         var row = window.SKAI_TOP_EXTRA[i] || {};
         var rn = parseInt(row.num, 10);
-        if (isFinite(rn)) { pushUnique(rn); }
+        if (isFinite(rn) && topExtras.indexOf(rn) === -1) { topExtras.push(rn); }
       }
+      addCandidate(topExtras);
     }
 
-    if (out.length < limit) {
-      var host = document.getElementById('aiExtraPredictionContainer');
-      var balls = host ? host.querySelectorAll('.xball') : [];
-      for (i = 0; i < balls.length && out.length < limit; i++) {
+    var host = document.getElementById('aiExtraPredictionContainer');
+    var balls = host ? host.querySelectorAll('.xball') : [];
+    if (balls && balls.length) {
+      var domExtras = [];
+      for (i = 0; i < balls.length && domExtras.length < limit; i++) {
         var bn = parseInt(String(balls[i].textContent || '').replace(/[^0-9\-]/g, ''), 10);
-        if (isFinite(bn)) { pushUnique(bn); }
+        if (isFinite(bn) && domExtras.indexOf(bn) === -1) { domExtras.push(bn); }
+      }
+      addCandidate(domExtras);
+    }
+
+    for (i = 0; i < candidates.length; i++) {
+      if (candidates[i].length >= limit) {
+        return candidates[i].slice(0, limit);
       }
     }
 
-    return out.slice(0, Math.max(0, limit));
+    var longest = [];
+    for (i = 0; i < candidates.length; i++) {
+      if (candidates[i].length > longest.length) {
+        longest = candidates[i];
+      }
+    }
+    return longest.slice(0, Math.max(0, limit));
   }
 
-  function _skaiPayloadHasExtras(jsonStr) {
+  function _skaiPayloadHasExtras(jsonStr, minCount) {
+    var need = parseInt(minCount, 10) || 1;
     if (!jsonStr) { return false; }
     try {
       var obj = JSON.parse(jsonStr);
       if (!obj || typeof obj !== 'object') { return false; }
-      if (Array.isArray(obj.extra_numbers) && obj.extra_numbers.length) { return true; }
+      if (Array.isArray(obj.extra_numbers) && obj.extra_numbers.length >= need) { return true; }
       var i;
       var fps = Array.isArray(obj.final_prediction_sets) ? obj.final_prediction_sets : [];
       for (i = 0; i < fps.length; i++) {
-        if (fps[i] && Array.isArray(fps[i].extra) && fps[i].extra.length) { return true; }
+        if (fps[i] && Array.isArray(fps[i].extra) && fps[i].extra.length >= need) { return true; }
       }
       var top5 = Array.isArray(obj.top_5_prediction_sets) ? obj.top_5_prediction_sets : [];
       for (i = 0; i < top5.length; i++) {
-        if (top5[i] && Array.isArray(top5[i].extra) && top5[i].extra.length) { return true; }
+        if (top5[i] && Array.isArray(top5[i].extra) && top5[i].extra.length >= need) { return true; }
       }
-      if (obj.primary_prediction_set && Array.isArray(obj.primary_prediction_set.extra) && obj.primary_prediction_set.extra.length) {
+      if (obj.primary_prediction_set && Array.isArray(obj.primary_prediction_set.extra) && obj.primary_prediction_set.extra.length >= need) {
         return true;
       }
     } catch (_) {}
@@ -49811,7 +49842,8 @@ document.addEventListener('DOMContentLoaded', function () {
   function _skaiSyncStandardExtraFields(form, extraArr) {
     if (!form || !_skaiIsStandardExtraLottery()) { return false; }
     var extras = _skaiNormalizeInts(extraArr || []);
-    if (!extras.length) { return false; }
+    if (extras.length < 5) { return false; }
+    extras = extras.slice(0, 5);
 
     try {
       var extraJsonFld = form.querySelector('input[name="extra_ball_numbers"]');
@@ -49903,16 +49935,16 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     var extras = _skaiCollectLiveExtraNumbers(extraLimit);
-    if (extras.length) {
+    if (extras.length >= extraLimit) {
       _skaiSyncStandardExtraFields(form, extras);
     }
 
     var topFld = form ? form.querySelector('input[name="top_combos_json"]') : null;
-    var payloadReady = _skaiPayloadHasExtras((topFld && topFld.value) ? topFld.value : (window.__SKAI_FPS_JSON__ || ''));
+    var payloadReady = _skaiPayloadHasExtras((topFld && topFld.value) ? topFld.value : (window.__SKAI_FPS_JSON__ || ''), extraLimit);
 
     return {
       gate: true,
-      ready: !!(markerReady && finalSourceReady && extras.length > 0 && payloadReady),
+      ready: !!(markerReady && finalSourceReady && extras.length >= extraLimit && payloadReady),
       extras: extras
     };
   }
@@ -50291,6 +50323,9 @@ document.addEventListener('DOMContentLoaded', function () {
     var _snapFpsJson             = null;
     var _snapDailyChosenCombos   = null;
     var _snapFinalPredictionSets = null;
+    var _needsStandardExtraFinal = false;
+    var _extraDoneFired          = true;
+    var _extraWaitTick           = 0;
 
     var finished        = false;
     var _doneFired      = false;
@@ -50347,7 +50382,42 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function checkAllDone() {
-      if (!_doneFired || !_scoreDoneFired) { return; }
+      if (!_doneFired || !_scoreDoneFired || !_extraDoneFired) { return; }
+      if (_needsStandardExtraFinal) {
+        var _stdExtraNow = [];
+        try {
+          if (_snapExtraNums && _snapExtraNums.length) {
+            _stdExtraNow = normalizeNumericArray(_snapExtraNums).slice(0, 5);
+          }
+          if (_stdExtraNow.length < 5 && window.__SKAI_LAST_EXTRA__ && window.__SKAI_LAST_EXTRA__.length) {
+            _stdExtraNow = normalizeNumericArray(window.__SKAI_LAST_EXTRA__).slice(0, 5);
+          }
+          if (_stdExtraNow.length < 5 && window.SKAI_LAST_EXTRA && window.SKAI_LAST_EXTRA.length) {
+            _stdExtraNow = normalizeNumericArray(window.SKAI_LAST_EXTRA).slice(0, 5);
+          }
+          if (_stdExtraNow.length < 5 && window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length) {
+            _stdExtraNow = normalizeNumericArray(window.skaiSaveExtraOrdered).slice(0, 5);
+          }
+          if (_stdExtraNow.length < 5 && window.SKAI_TOP_EXTRA && window.SKAI_TOP_EXTRA.length) {
+            var _sx = [];
+            for (var _sxi = 0; _sxi < window.SKAI_TOP_EXTRA.length && _sx.length < 5; _sxi++) {
+              var _sxn = parseInt(window.SKAI_TOP_EXTRA[_sxi] && window.SKAI_TOP_EXTRA[_sxi].num, 10);
+              if (isFinite(_sxn) && _sx.indexOf(_sxn) === -1) { _sx.push(_sxn); }
+            }
+            if (_sx.length) { _stdExtraNow = _sx.slice(0, 5); }
+          }
+        } catch (_) {}
+        if (_stdExtraNow.length < 5 && !finished) {
+          _extraWaitTick += 1;
+          if (_extraWaitTick <= 80) {
+            setTimeout(checkAllDone, 150);
+            return;
+          }
+        }
+        if (_stdExtraNow.length) {
+          _snapExtraNums = _stdExtraNow.slice(0, 5);
+        }
+      }
       // Both gates satisfied. Guard: only call finish() if numbers are actually
       // available.  skai:score:done can fire during epoch callbacks (skai:ml:epoch
       // → render() → SKAI_scoreAndRender) with stale probs from a previous run
@@ -50403,6 +50473,33 @@ document.addEventListener('DOMContentLoaded', function () {
         _scoreDoneFired = true;
         checkAllDone();
       }, false);
+      if (_needsStandardExtraFinal) {
+        window.addEventListener('skai:extra:done', function onExtraDone(ev) {
+          try { window.removeEventListener('skai:extra:done', onExtraDone, false); } catch (_) {}
+          try {
+            var _evtTop = (((ev || {}).detail || {}).top || []);
+            var _evtExtra = [];
+            for (var _ei = 0; _ei < _evtTop.length && _evtExtra.length < 5; _ei++) {
+              var _en = parseInt((_evtTop[_ei] && _evtTop[_ei].num != null) ? _evtTop[_ei].num : _evtTop[_ei], 10);
+              if (isFinite(_en) && _evtExtra.indexOf(_en) === -1) { _evtExtra.push(_en); }
+            }
+            if (_evtExtra.length) {
+              _snapExtraNums = _evtExtra.slice(0, 5);
+            }
+          } catch (_) {}
+          _extraDoneFired = true;
+          checkAllDone();
+        }, false);
+      }
+    }
+
+    try {
+      var _metaX = window.SKAI_META || {};
+      _needsStandardExtraFinal = !!(_metaX && _metaX.isStandardLotteryGame && _metaX.hasExtraBall && !_metaX.isDaily && !_metaX.isDailyDigitGame);
+      _extraDoneFired = !_needsStandardExtraFinal;
+    } catch (_) {
+      _needsStandardExtraFinal = false;
+      _extraDoneFired = true;
     }
 
     // FIX: Register completion listeners immediately so they receive skai:done and
@@ -51181,6 +51278,10 @@ document.addEventListener('DOMContentLoaded', function () {
     // 1. Resolve main and extra numbers from the batch result with fallbacks
     var _bfIsDaily = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
                         && !window.SKAI_META.isStandardLotteryGame);
+    var _bfNeedsStdFive = !!(window.SKAI_META && window.SKAI_META.isStandardLotteryGame
+                        && window.SKAI_META.hasExtraBall
+                        && !window.SKAI_META.isDaily
+                        && !window.SKAI_META.isDailyDigitGame);
     var _mainNums  = [];
     var _extraNums = [];
     var _dailyStrings = [];
@@ -51224,6 +51325,58 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       _mainNums = _dcPrimary.slice();
     } else {
+      var _bfCollectStandardExtras = function() {
+        var _cand = [];
+        var _add = function(_arr) {
+          var _n = normalizeNumericArray(_arr || []);
+          var _u = [];
+          var _i;
+          for (_i = 0; _i < _n.length; _i++) {
+            if (_u.indexOf(_n[_i]) === -1) { _u.push(_n[_i]); }
+          }
+          if (_u.length) { _cand.push(_u.slice(0, 5)); }
+        };
+        _add(r.extraNumbers || []);
+        if (r.finalPredictionSets && r.finalPredictionSets.length) {
+          var _fps0xLocal = (r.finalPredictionSets[0] && r.finalPredictionSets[0].extra) ? r.finalPredictionSets[0].extra : [];
+          _add(_fps0xLocal);
+        }
+        if (r.fpsJson) {
+          try {
+            var _rf = JSON.parse(r.fpsJson);
+            if (_rf && Array.isArray(_rf.extra_numbers)) { _add(_rf.extra_numbers); }
+            if (_rf && Array.isArray(_rf.final_prediction_sets) && _rf.final_prediction_sets.length) {
+              _add((_rf.final_prediction_sets[0] && _rf.final_prediction_sets[0].extra) ? _rf.final_prediction_sets[0].extra : []);
+            }
+            if (_rf && Array.isArray(_rf.top_5_prediction_sets) && _rf.top_5_prediction_sets.length) {
+              _add((_rf.top_5_prediction_sets[0] && _rf.top_5_prediction_sets[0].extra) ? _rf.top_5_prediction_sets[0].extra : []);
+            }
+            if (_rf && _rf.primary_prediction_set && Array.isArray(_rf.primary_prediction_set.extra)) {
+              _add(_rf.primary_prediction_set.extra);
+            }
+          } catch(_) {}
+        }
+        _add(window.__SKAI_LAST_EXTRA__ || []);
+        _add(window.SKAI_LAST_EXTRA || []);
+        _add(window.skaiSaveExtraOrdered || []);
+        if (window.SKAI_TOP_EXTRA && window.SKAI_TOP_EXTRA.length) {
+          var _top5 = [];
+          for (var _txi = 0; _txi < window.SKAI_TOP_EXTRA.length && _top5.length < 5; _txi++) {
+            var _txn = parseInt(window.SKAI_TOP_EXTRA[_txi] && window.SKAI_TOP_EXTRA[_txi].num, 10);
+            if (isFinite(_txn) && _top5.indexOf(_txn) === -1) { _top5.push(_txn); }
+          }
+          _add(_top5);
+        }
+        var _ci;
+        for (_ci = 0; _ci < _cand.length; _ci++) {
+          if (_cand[_ci].length >= 5) { return _cand[_ci].slice(0, 5); }
+        }
+        var _longest = [];
+        for (_ci = 0; _ci < _cand.length; _ci++) {
+          if (_cand[_ci].length > _longest.length) { _longest = _cand[_ci]; }
+        }
+        return _longest.slice(0, 5);
+      };
       // Mimic the regular save: read skaiSaveMainOrdered live (primary source), exactly
       // as the manual save button does at lines 41830-41834.  The per-run snapshot
       // r.mainNumbers is kept as an immediate fallback in case the live global was cleared.
@@ -51279,16 +51432,12 @@ document.addEventListener('DOMContentLoaded', function () {
           }
         } catch (_) {}
       }
-      _extraNums = (r.extraNumbers && r.extraNumbers.length) ? normalizeNumericArray(r.extraNumbers).slice(0, 5) : [];
-      if (!_extraNums.length && r.finalPredictionSets && r.finalPredictionSets.length) {
+      _extraNums = _bfNeedsStdFive ? _bfCollectStandardExtras() : ((r.extraNumbers && r.extraNumbers.length) ? normalizeNumericArray(r.extraNumbers).slice(0, 5) : []);
+      if (!_bfNeedsStdFive && !_extraNums.length && r.finalPredictionSets && r.finalPredictionSets.length) {
         var _fps0x = (r.finalPredictionSets[0] && r.finalPredictionSets[0].extra) ? r.finalPredictionSets[0].extra : [];
         _extraNums = normalizeNumericArray(_fps0x).slice(0, 5);
       }
-      // [FIX-BUG-A] Live-global fallback for extra-ball lotteries.
-      // _snapExtraNums is captured at skai:score:done time, before SKAI_runExtra
-      // completes. If r.extraNumbers is still empty here, mirror skaiPrepareAiSave
-      // and read the live globals that SKAI_runExtra wrote before skai:extra:done.
-      if (!_extraNums.length && window.SKAI_META && window.SKAI_META.hasExtraBall) {
+      if (!_bfNeedsStdFive && !_extraNums.length && window.SKAI_META && window.SKAI_META.hasExtraBall) {
         var _bfLiveExtra = window.__SKAI_LAST_EXTRA__ || window.SKAI_LAST_EXTRA || window.skaiSaveExtraOrdered || [];
         if (_bfLiveExtra && _bfLiveExtra.length) {
           _extraNums = normalizeNumericArray(_bfLiveExtra).slice(0, 5);
@@ -51320,12 +51469,22 @@ document.addEventListener('DOMContentLoaded', function () {
     // proceed anyway so the save attempt is never lost.
     var _bfExtraReady = _bfIsDaily
       ? !!(r.dailyExtraDigits && r.dailyExtraDigits.length)
-      : (_extraNums.length > 0);
+      : (_bfNeedsStdFive ? (_extraNums.length >= 5) : (_extraNums.length > 0));
     if (window.SKAI_META && window.SKAI_META.hasExtraBall && !_bfExtraReady) {
       r._bfExtraPollTick = (r._bfExtraPollTick || 0) + 1;
       if (r._bfExtraPollTick <= 150) { // 150 x 2 s = 5 min
         setBatchSaveStatus('Waiting for extra numbers to complete... (' + (r._bfExtraPollTick * 2) + 's)');
         setTimeout(function() { saveAllSequential(indices, doneCallback, position, total); }, 2000);
+        return;
+      }
+      if (_bfNeedsStdFive) {
+        setBatchSaveStatus('Save failed: standard extras not finalized for run ' + (idx + 1) + '.');
+        setCurrentLabel('Save failed at run ' + (idx + 1) + '.');
+        setBatchSaveBtnsDisabled(false);
+        if (window.skaiShowSaveToast) { window.skaiShowSaveToast('Save failed at run ' + (idx + 1) + ': extras_not_ready'); }
+        if (doneCallback) {
+          doneCallback({ ok: false, failedIndex: idx, detail: { reason: 'extras_not_ready', message: 'Standard extra payload did not finalize to 5 numbers.' } });
+        }
         return;
       }
       // 5-minute wait exhausted -- proceed anyway so the save attempt is not lost.
